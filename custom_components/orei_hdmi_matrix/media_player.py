@@ -35,6 +35,7 @@ from .const import (
     ATTR_HDCP,
     ATTR_INPUT_ACTIVE,
     ATTR_INPUT_EDID,
+    ATTR_INPUT_NUM,
     ATTR_SCALER_MODE,
     ATTR_SOURCE,
     ATTR_STREAM,
@@ -127,7 +128,7 @@ SERVICE_OUTPUT_CEC_SCHEMA = vol.Schema(
 
 SERVICE_INPUT_CEC_SCHEMA = vol.Schema(
     {
-        vol.Required(ATTR_ENTITY_ID): cv.entity_ids,
+        vol.Required(ATTR_INPUT_NUM): vol.All(vol.Coerce(int), vol.In(range(1, 9))),
         vol.Required(ATTR_CEC_CMD): cv.enum(InputCECCommands),
     }
 )
@@ -290,21 +291,9 @@ def setup_platform(
 
     def input_cec_command_service_handle(service):
         """Handler for sending input CEC command."""
-        entity_ids = service.data.get(ATTR_ENTITY_ID)
+        input_id = service.data.get(ATTR_INPUT_NUM) - 1
         cmd = service.data.get(ATTR_CEC_CMD)
-
-        if entity_ids:
-            devices = [
-                device
-                for device in hass.data[DATA_HDMIMATRIX].values()
-                if device.entity_id in entity_ids
-            ]
-        else:
-            devices = hass.data[DATA_HDMIMATRIX].values()
-
-        for device in devices:
-            if service.service == SERVICE_INPUT_CEC:
-                device.input_cec_command(cmd)
+        matrix_api.input_cec_command(self._host, input_id, cmd)
 
     hass.services.register(
         DOMAIN,
