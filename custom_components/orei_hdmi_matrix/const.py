@@ -54,6 +54,8 @@ ATTR_HDCP: Final = "hdcp"
 
 ATTR_INPUT_EDID: Final = "input_edid"
 
+ATTR_INPUT_NUM: Final = "input_num"
+
 ATTR_INPUT_ACTIVE: Final = "input_active"
 
 ATTR_CEC_CMD: Final = "cec_cmd"
