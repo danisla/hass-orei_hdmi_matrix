@@ -159,8 +159,7 @@ class HDMIMatrixAPI:
 
             _LOGGER.debug(f"Cache miss: '{cache_key}'")
 
-        resp_data = None
-        for retry_count in range(5):
+        for _ in range(5):
             req = urllib.request.Request(
                 f"http://{host}/cgi-bin/instr",
                 data=json.dumps(cmd).encode("utf-8"),
@@ -168,33 +167,37 @@ class HDMIMatrixAPI:
                 method="POST",
             )
             try:
+                resp_data = None
                 with urllib.request.urlopen(req, timeout=5) as r:
                     if r.getcode() == 200:
                         resp_data = json.load(r)
+                        if self._validate_comhead_response(cmd["comhead"], resp_data):
+                            self._cache[cache_key] = (
+                                time.time(),
+                                json.dumps(resp_data),
+                            )
+                            return resp_data
+
+                        _LOGGER.error(
+                            f"Invalid data from device for cmd: '{cmd}': '{resp_data}'"
+                        )
+                        resp_data = None
             except Exception as e:
                 _LOGGER.error(f"Error connecting to the HDMI Matrix: {e}")
 
-            if not self._validate_comhead_response(cmd["comhead"], resp_data):
-                _LOGGER.error(
-                    f"Invalid data from device for cmd: '{cmd}': '{resp_data}'"
-                )
-                resp_data = None
-
-            if resp_data:
-                break
             time.sleep(1)
 
-        if resp_data and use_cache:
-            self._cache[cache_key] = (time.time(), json.dumps(resp_data))
-
-        return resp_data
+        return None
 
     def _validate_comhead_response(self, comhead, resp):
-        valid = "comhead" in resp and resp["comhead"] == comhead
+        valid = resp is not None and "comhead" in resp and resp["comhead"] == comhead
         if not resp:
             return False
         if comhead == "get video status":
             for field in ["allsource", "allinputname", "alloutputname"]:
+                valid &= field in resp
+        elif comhead == "get system status":
+            for field in ["power", "baudrate", "beep", "lock", "mode", "version"]:
                 valid &= field in resp
         elif comhead == "get output status":
             for field in [
@@ -212,6 +215,13 @@ class HDMIMatrixAPI:
                 valid &= field in resp
 
         return valid
+
+    def get_system_status(self, host):
+        """Gets the system status"""
+        with self._lock:
+            return self._hdmi_matrix_cmd(
+                host, {"comhead": "get system status"}, use_cache=True
+            )
 
     def get_video_status(self, host):
         """Get the video status."""
@@ -304,5 +314,23 @@ class HDMIMatrixAPI:
                     "port": [1 if i == input_id else 0 for i in range(8)],
                     "index": cmd.value,
                 },
+                use_cache=False,
+            )
+
+    def power_on(self, host):
+        """Send command to power on and exit standby"""
+        with self._lock:
+            return self._hdmi_matrix_cmd(
+                host,
+                {"comhead": "set poweronoff", "power": 1},
+                use_cache=False,
+            )
+
+    def standby(self, host):
+        """Send command to enter standby"""
+        with self._lock:
+            return self._hdmi_matrix_cmd(
+                host,
+                {"comhead": "set poweronoff", "power": 0},
                 use_cache=False,
             )
