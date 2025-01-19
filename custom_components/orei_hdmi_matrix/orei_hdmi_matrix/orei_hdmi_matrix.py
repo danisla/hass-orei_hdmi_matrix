@@ -136,6 +136,27 @@ class EDIDModes(Enum):
     EDID_COPY_FROM_HDBT_OUT_8 = 39
 
 
+class LCDModes(Enum):
+    """Enum for setting the LCD modes."""
+
+    LCD_MODE_OFF = 0
+    LCD_MODE_ALWAYS_ON = 1
+    LCD_MODE_15_SEC = 2
+    LCD_MODE_30_SEC = 3
+    LCD_MODE_60_SEC = 4
+
+
+class SerialBaudRates(Enum):
+    """Enum for setting the serial baud rate."""
+
+    BAUD_4800 = 1
+    BAUD_9600 = 2
+    BAUD_19200 = 3
+    BAUD_38400 = 4
+    BAUD_57600 = 5
+    BAUD_115200 = 6
+
+
 class HDMIMatrixAPI:
     """HDMI Matrix API abstration."""
 
@@ -143,8 +164,9 @@ class HDMIMatrixAPI:
         """Initialize the API."""
         self._lock = RLock()
         self._cache: Mapping[str, (int, str)] = {}
+        self._max_req_attempts = 4
 
-    def _hdmi_matrix_cmd(self, host, cmd, use_cache=False):
+    def _hdmi_matrix_cmd(self, host, cmd, use_cache=False, invalidate_cache_keys=None):
         cmd["language"] = 0
         cache_key = cmd["comhead"]
 
@@ -159,35 +181,50 @@ class HDMIMatrixAPI:
 
             _LOGGER.debug(f"Cache miss: '{cache_key}'")
 
-        for _ in range(5):
-            req = urllib.request.Request(
-                f"http://{host}/cgi-bin/instr",
-                data=json.dumps(cmd).encode("utf-8"),
-                headers={"Accept": "application/json"},
-                method="POST",
-            )
-            try:
-                resp_data = None
-                with urllib.request.urlopen(req, timeout=5) as r:
-                    if r.getcode() == 200:
-                        resp_data = json.load(r)
-                        if self._validate_comhead_response(cmd["comhead"], resp_data):
-                            self._cache[cache_key] = (
-                                time.time(),
-                                json.dumps(resp_data),
+        resp_data = None
+        with self._lock:
+            if cache_key in self._cache:
+                del self._cache[cache_key]
+            if invalidate_cache_keys:
+                for key in invalidate_cache_keys:
+                    if key in self._cache:
+                        del self._cache[key]
+
+            for i in range(self._max_req_attempts):
+                req = urllib.request.Request(
+                    f"http://{host}/cgi-bin/instr",
+                    data=json.dumps(cmd).encode("utf-8"),
+                    headers={"Accept": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        if r.getcode() == 200:
+                            resp_data = json.loads(r.read().decode("utf-8"))
+                            if self._validate_comhead_response(
+                                cmd["comhead"], resp_data
+                            ):
+                                self._cache[cache_key] = (
+                                    time.time(),
+                                    json.dumps(resp_data),
+                                )
+                                break
+
+                            _LOGGER.debug(
+                                f"Invalid data from device for cmd: '{cmd}': '{resp_data}'"
                             )
-                            return resp_data
+                            resp_data = None
+                except Exception as e:
+                    _LOGGER.error(f"Error connecting to the HDMI Matrix: {e}")
 
-                        _LOGGER.error(
-                            f"Invalid data from device for cmd: '{cmd}': '{resp_data}'"
-                        )
-                        resp_data = None
-            except Exception as e:
-                _LOGGER.error(f"Error connecting to the HDMI Matrix: {e}")
+                if i < self._max_req_attempts - 1:
+                    time.sleep(0.5)
+                else:
+                    _LOGGER.error(
+                        f"Failed to connect to the HDMI Matrix after {self._max_req_attempts} attempts"
+                    )
 
-            time.sleep(1)
-
-        return None
+        return resp_data
 
     def _validate_comhead_response(self, comhead, resp):
         valid = resp is not None and "comhead" in resp and resp["comhead"] == comhead
@@ -218,119 +255,122 @@ class HDMIMatrixAPI:
 
     def get_system_status(self, host):
         """Gets the system status"""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host, {"comhead": "get system status"}, use_cache=True
-            )
+        return self._hdmi_matrix_cmd(
+            host, {"comhead": "get system status"}, use_cache=True
+        )
 
     def get_video_status(self, host):
         """Get the video status."""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host, {"comhead": "get video status"}, use_cache=True
-            )
+        return self._hdmi_matrix_cmd(
+            host, {"comhead": "get video status"}, use_cache=True
+        )
 
     def get_output_status(self, host):
         """Get the output status."""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host, {"comhead": "get output status"}, use_cache=True
-            )
+        return self._hdmi_matrix_cmd(
+            host, {"comhead": "get output status"}, use_cache=True
+        )
 
     def get_input_status(self, host):
         """Get the input status."""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host, {"comhead": "get input status"}, use_cache=True
-            )
+        return self._hdmi_matrix_cmd(
+            host, {"comhead": "get input status"}, use_cache=True
+        )
 
     def video_switch(self, host, input_id, output_id):
         """Switch video source."""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host,
-                {"comhead": "video switch", "source": [input_id, output_id]},
-                use_cache=False,
-            )
+        return self._hdmi_matrix_cmd(
+            host,
+            {"comhead": "video switch", "source": [input_id, output_id]},
+            use_cache=False,
+            invalidate_cache_keys=["get video status"],
+        )
 
     def tx_stream(self, host, output_id, on_state):
         """Tx Stream switch."""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host,
-                {"comhead": "tx stream", "out": [output_id, int(on_state)]},
-                use_cache=False,
-            )
+        return self._hdmi_matrix_cmd(
+            host,
+            {"comhead": "tx stream", "out": [output_id, int(on_state)]},
+            use_cache=False,
+            invalidate_cache_keys=["get output status"],
+        )
 
     def set_arc(self, host, output_id, on_state):
         """Set ARC on output."""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host,
-                {"comhead": "set arc", "arc": [output_id, int(on_state)]},
-                use_cache=False,
-            )
+        return self._hdmi_matrix_cmd(
+            host,
+            {"comhead": "set arc", "arc": [output_id, int(on_state)]},
+            use_cache=False,
+            invalidate_cache_keys=["get output status"],
+        )
 
     def video_scaler(self, host, output_id, scaler_mode: ScalerModes):
         """Set video scaler."""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host,
-                {"comhead": "video scaler", "scaler": [output_id, scaler_mode.value]},
-                use_cache=False,
-            )
+        return self._hdmi_matrix_cmd(
+            host,
+            {"comhead": "video scaler", "scaler": [output_id, scaler_mode.value]},
+            use_cache=False,
+            invalidate_cache_keys=["get output status"],
+        )
 
     def set_input_edid(self, host, input_id, edid_mode: EDIDModes):
         """Set input EDID."""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host,
-                {"comhead": "set edid", "edid": [input_id, edid_mode.value]},
-                use_cache=False,
-            )
+        return self._hdmi_matrix_cmd(
+            host,
+            {"comhead": "set edid", "edid": [input_id, edid_mode.value]},
+            use_cache=False,
+            invalidate_cache_keys=["get input status"],
+        )
 
     def output_cec_command(self, host, output_id, cmd: OutputCECCommands):
         """Send output a CEC command"""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host,
-                {
-                    "comhead": "cec command",
-                    "object": 1,
-                    "port": [1 if i == output_id else 0 for i in range(8)],
-                    "index": cmd.value,
-                },
-                use_cache=False,
-            )
+        return self._hdmi_matrix_cmd(
+            host,
+            {
+                "comhead": "cec command",
+                "object": 1,
+                "port": [1 if i == output_id else 0 for i in range(8)],
+                "index": cmd.value,
+            },
+            use_cache=False,
+        )
 
     def input_cec_command(self, host, input_id, cmd: InputCECCommands):
         """Send output a CEC command"""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host,
-                {
-                    "comhead": "cec command",
-                    "object": 0,
-                    "port": [1 if i == input_id else 0 for i in range(8)],
-                    "index": cmd.value,
-                },
-                use_cache=False,
-            )
+        return self._hdmi_matrix_cmd(
+            host,
+            {
+                "comhead": "cec command",
+                "object": 0,
+                "port": [1 if i == input_id else 0 for i in range(8)],
+                "index": cmd.value,
+            },
+            use_cache=False,
+        )
 
-    def power_on(self, host):
-        """Send command to power on and exit standby"""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host,
-                {"comhead": "set poweronoff", "power": 1},
-                use_cache=False,
-            )
-
-    def standby(self, host):
+    def set_power(self, host, powered_on=False):
         """Send command to enter standby"""
-        with self._lock:
-            return self._hdmi_matrix_cmd(
-                host,
-                {"comhead": "set poweronoff", "power": 0},
-                use_cache=False,
-            )
+        self._hdmi_matrix_cmd(
+            host,
+            {"comhead": "set poweronoff", "power": (1 if powered_on else 0)},
+            use_cache=False,
+            invalidate_cache_keys=["get system status"],
+        )
+
+    def set_panel_lock(self, host, locked=False):
+        """Send command to lock the panel"""
+        self._hdmi_matrix_cmd(
+            host,
+            {"comhead": "set panel lock", "lock": (1 if locked else 0)},
+            use_cache=False,
+            invalidate_cache_keys=["get system status"],
+        )
+
+    def set_beep(self, host, enable_beep=False):
+        """Send command to enable/disable beep"""
+        self._hdmi_matrix_cmd(
+            host,
+            {"comhead": "set beep", "beep": (1 if enable_beep else 0)},
+            use_cache=False,
+            invalidate_cache_keys=["get system status"],
+        )
